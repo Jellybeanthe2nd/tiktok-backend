@@ -5,7 +5,10 @@ import subprocess
 from flask import Flask, request, jsonify
 import cloudinary
 import cloudinary.uploader
+import imageio_ffmpeg
+import os
 
+os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
 app = Flask(__name__)
 
 # ----------------------------
