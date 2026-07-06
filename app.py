@@ -8,7 +8,7 @@ import cloudinary.uploader
 app = Flask(__name__)
 
 # ----------------------------
-# SYSTEM FFMPEG (Docker installed)
+# SYSTEM FFMPEG (Docker)
 # ----------------------------
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
@@ -19,26 +19,23 @@ FFPROBE = "ffprobe"
 cloudinary.config(
     cloud_name="cbtzmlen",
     api_key="761773767925476",
-    api_secret="cLa3fC04tiT5ByxCqXYfJ9cYmVA"
+    api_secret="YOUR_API_SECRET_HERE"
 )
 
 # ----------------------------
-# TEMP FOLDER
+# TEMP DIR
 # ----------------------------
 TEMP_DIR = "temp"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 # ----------------------------
-# RUN COMMAND HELPER
+# HELPERS
 # ----------------------------
 def run(cmd):
     subprocess.run(cmd, check=True)
 
 
-# ----------------------------
-# DOWNLOAD FILES
-# ----------------------------
 def download_file(url, filename):
     path = os.path.join(TEMP_DIR, filename)
 
@@ -53,9 +50,6 @@ def download_file(url, filename):
     return path
 
 
-# ----------------------------
-# GET DURATION (ROBUST FFMPEG WAY)
-# ----------------------------
 def get_duration(file_path):
     result = subprocess.check_output([
         FFPROBE,
@@ -89,20 +83,20 @@ def generate_video():
     try:
         for i in range(len(video_urls)):
 
-            # ------------------------
+            # ----------------------------
             # DOWNLOAD
-            # ------------------------
+            # ----------------------------
             video_path = download_file(video_urls[i], f"video_{i}.mp4")
             audio_path = download_file(audio_urls[i], f"audio_{i}.mp3")
 
-            # ------------------------
-            # GET AUDIO DURATION
-            # ------------------------
+            # ----------------------------
+            # DURATION
+            # ----------------------------
             duration = get_duration(audio_path)
 
-            # ------------------------
-            # SPEED ADJUST VIDEO
-            # ------------------------
+            # ----------------------------
+            # ADJUST VIDEO SPEED
+            # ----------------------------
             adjusted_video = os.path.join(TEMP_DIR, f"adjusted_{i}.mp4")
 
             run([
@@ -112,16 +106,18 @@ def generate_video():
                 adjusted_video
             ])
 
-            # ------------------------
-            # MERGE AUDIO + VIDEO
-            # ------------------------
+            # ----------------------------
+            # MERGE AUDIO + VIDEO (FIXED)
+            # ----------------------------
             scene_path = os.path.join(TEMP_DIR, f"scene_{i}.mp4")
 
             run([
                 FFMPEG, "-y",
                 "-i", adjusted_video,
                 "-i", audio_path,
-                "-c:v", "copy",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "libx264",
                 "-c:a", "aac",
                 "-shortest",
                 scene_path
@@ -129,9 +125,9 @@ def generate_video():
 
             scenes.append(scene_path)
 
-        # ------------------------
-        # CONCAT ALL SCENES
-        # ------------------------
+        # ----------------------------
+        # CONCAT SCENES
+        # ----------------------------
         concat_file = os.path.join(TEMP_DIR, "concat.txt")
 
         with open(concat_file, "w") as f:
@@ -149,9 +145,9 @@ def generate_video():
             final_output
         ])
 
-        # ------------------------
+        # ----------------------------
         # UPLOAD TO CLOUDINARY
-        # ------------------------
+        # ----------------------------
         upload = cloudinary.uploader.upload_large(
             final_output,
             resource_type="video"
@@ -170,7 +166,7 @@ def generate_video():
 
 
 # ----------------------------
-# RUN LOCALLY (ignored on Docker deploy)
+# RUN
 # ----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
