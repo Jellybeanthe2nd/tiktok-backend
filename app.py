@@ -39,17 +39,16 @@ def download(url, name):
     return path
 
 def duration(file):
-    out = subprocess.check_output([
+    return float(subprocess.check_output([
         FFPROBE,
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
         file
-    ]).decode().strip()
-    return float(out)
+    ]).decode().strip())
 
 # ----------------------------
-# MAIN ROUTE
+# MAIN API
 # ----------------------------
 @app.route("/generate-video", methods=["POST"])
 def generate_video():
@@ -67,13 +66,13 @@ def generate_video():
         for i in range(len(video_urls)):
 
             # ----------------------------
-            # DOWNLOAD
+            # DOWNLOAD FILES
             # ----------------------------
             video = download(video_urls[i], f"v{i}.mp4")
             audio = download(audio_urls[i], f"a{i}.mp3")
 
             # ----------------------------
-            # DURATIONS
+            # GET DURATIONS
             # ----------------------------
             v_dur = duration(video)
             a_dur = duration(audio)
@@ -85,16 +84,20 @@ def generate_video():
 
             adjusted = os.path.join(TEMP_DIR, f"adj_{i}.mp4")
 
+            # IMPORTANT FIX:
+            # reset timestamps + force CFR + prevent freeze frames
             run([
                 FFMPEG, "-y",
                 "-i", video,
                 "-filter:v", f"setpts={speed}*PTS",
+                "-r", "30",
+                "-vsync", "cfr",
                 "-an",
                 adjusted
             ])
 
             # ----------------------------
-            # MERGE
+            # MERGE AUDIO + VIDEO
             # ----------------------------
             scene = os.path.join(TEMP_DIR, f"scene_{i}.mp4")
 
@@ -106,7 +109,7 @@ def generate_video():
                 "-map", "1:a:0",
                 "-c:v", "libx264",
                 "-c:a", "aac",
-                "-r", "30",
+                "-pix_fmt", "yuv420p",
                 "-shortest",
                 scene
             ])
@@ -134,7 +137,7 @@ def generate_video():
         ])
 
         # ----------------------------
-        # UPLOAD
+        # UPLOAD TO CLOUDINARY
         # ----------------------------
         upload = cloudinary.uploader.upload_large(
             final,
@@ -154,7 +157,7 @@ def generate_video():
 
 
 # ----------------------------
-# START
+# RUN SERVER
 # ----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
