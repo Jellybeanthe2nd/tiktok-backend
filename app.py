@@ -1,35 +1,36 @@
 import os
-import requests
 import subprocess
-from flask import Flask, request, jsonify
+import requests
 import cloudinary
 import cloudinary.uploader
+
+from flask import Flask, request, jsonify
+
 
 app = Flask(__name__)
 
 
-# ==========================
+# =========================
 # CONFIG
-# ==========================
-
-FFMPEG = "ffmpeg"
-FFPROBE = "ffprobe"
+# =========================
 
 TEMP_DIR = "temp"
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+FFMPEG = "ffmpeg"
+FFPROBE = "ffprobe"
 
 
 cloudinary.config(
     cloud_name="cbtzmlen",
     api_key="761773767925476",
-    api_secret="cLa3fC04tiT5ByxCqXYfJ9cYmVA"
+    api_secret="YOUR_SECRET_HERE"
 )
 
 
-
-# ==========================
+# =========================
 # HELPERS
-# ==========================
+# =========================
 
 def run(cmd):
     print("RUNNING:")
@@ -46,20 +47,19 @@ def run(cmd):
         print(result.stderr)
         raise Exception(result.stderr)
 
-    return result.stdout
-
+    return result
 
 
 def download(url, filename):
 
     path = os.path.join(TEMP_DIR, filename)
 
-    r = requests.get(
-        url,
-        timeout=120
-    )
+    r = requests.get(url, timeout=120)
 
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise Exception(
+            f"Download failed {r.status_code}: {url}"
+        )
 
     with open(path, "wb") as f:
         f.write(r.content)
@@ -70,7 +70,7 @@ def download(url, filename):
 
 def get_duration(file):
 
-    output = run([
+    result = subprocess.check_output([
         FFPROBE,
         "-v",
         "error",
@@ -81,72 +81,55 @@ def get_duration(file):
         file
     ])
 
-    return float(output.strip())
+    return float(result.decode().strip())
 
 
 
-# ==========================
-# VIDEO PROCESSING
-# ==========================
+def normalize_video(input_file, output_file):
 
-def resize_video_to_audio(video, audio, index):
+    run([
+        FFMPEG,
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-i",
+        input_file,
 
-    video_duration = get_duration(video)
-    audio_duration = get_duration(audio)
+        "-c:v",
+        "libx264",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        output_file
+    ])
 
 
-    print("======================")
-    print("Scene", index)
-    print("Original video:", video_duration)
-    print("Audio:", audio_duration)
-    print("======================")
 
+def stretch_video(input_file, output_file, target_duration):
 
-    if video_duration <= 0:
+    current_duration = get_duration(input_file)
+
+    if current_duration <= 0:
         raise Exception("Video duration is zero")
 
 
-    if audio_duration <= 0:
-        raise Exception("Audio duration is zero")
+    multiplier = target_duration / current_duration
 
 
-    # This is the important part:
-    #
-    # Example:
-    # video = 1 sec
-    # audio = 5 sec
-    #
-    # factor = 0.2
-    #
-    # setpts=0.2*PTS
-    #
-    # slows video 5x
-
-
-   speed_factor = audio_duration / video_duration
-
-
-    stretched_video = os.path.join(
-        TEMP_DIR,
-        f"stretched_{index}.mp4"
+    print(
+        f"Stretching video {current_duration}s -> {target_duration}s"
     )
-
 
     run([
         FFMPEG,
         "-y",
 
         "-i",
-        video,
+        input_file,
 
         "-vf",
-        f"setpts={speed_factor}*PTS",
-
-        "-r",
-        "24",
-
-        "-vsync",
-        "cfr",
+        f"setpts={multiplier}*PTS",
 
         "-an",
 
@@ -159,73 +142,14 @@ def resize_video_to_audio(video, audio, index):
         "-pix_fmt",
         "yuv420p",
 
-        stretched_video
+        output_file
     ])
 
 
-    new_duration = get_duration(stretched_video)
 
-
-    print("After stretching:", new_duration)
-    print("Target:", audio_duration)
-
-
-    # Allow 0.15 second difference
-    if abs(new_duration - audio_duration) > 0.15:
-
-        raise Exception(
-            f"Video resize failed. Got {new_duration}s expected {audio_duration}s"
-        )
-
-
-    return stretched_video
-
-
-
-def merge_audio_video(video, audio, index):
-
-    output = os.path.join(
-        TEMP_DIR,
-        f"scene_{index}.mp4"
-    )
-
-
-    run([
-        FFMPEG,
-        "-y",
-
-        "-i",
-        video,
-
-        "-i",
-        audio,
-
-        "-map",
-        "0:v:0",
-
-        "-map",
-        "1:a:0",
-
-        "-c:v",
-        "libx264",
-
-        "-c:a",
-        "aac",
-
-        "-pix_fmt",
-        "yuv420p",
-
-        output
-    ])
-
-
-    return output
-
-
-
-# ==========================
+# =========================
 # API
-# ==========================
+# =========================
 
 @app.route("/generate-video", methods=["POST"])
 def generate_video():
@@ -235,28 +159,23 @@ def generate_video():
         data = request.json
 
 
-        video_urls = data.get("video_urls", [])
-        audio_urls = data.get("audio_urls", [])
+        video_urls = data["video_urls"]
+        audio_urls = data["audio_urls"]
 
 
-        if len(video_urls) != len(audio_urls):
-
-            return jsonify({
-                "status":"error",
-                "message":"video_urls and audio_urls count mismatch"
-            }),400
-
-
-
-        scenes=[]
+        scenes = []
 
 
         for i in range(len(video_urls)):
 
 
+            print("===================")
+            print("SCENE", i)
+
+
             video = download(
                 video_urls[i],
-                f"video_{i}.mp4"
+                f"input_video_{i}.mp4"
             )
 
 
@@ -266,42 +185,101 @@ def generate_video():
             )
 
 
-            fixed_video = resize_video_to_audio(
+            print(
+                "SOURCE VIDEO:",
+                get_duration(video)
+            )
+
+            print(
+                "AUDIO:",
+                get_duration(audio)
+            )
+
+
+            normalized = os.path.join(
+                TEMP_DIR,
+                f"normalized_{i}.mp4"
+            )
+
+
+            normalize_video(
                 video,
-                audio,
-                i
+                normalized
             )
 
 
-            scene = merge_audio_video(
-                fixed_video,
-                audio,
-                i
+            audio_duration = get_duration(audio)
+
+
+            stretched = os.path.join(
+                TEMP_DIR,
+                f"stretched_{i}.mp4"
             )
 
 
-            scenes.append(scene)
+            stretch_video(
+                normalized,
+                stretched,
+                audio_duration
+            )
+
+
+            final_scene = os.path.join(
+                TEMP_DIR,
+                f"scene_{i}.mp4"
+            )
+
+
+            run([
+                FFMPEG,
+                "-y",
+
+                "-i",
+                stretched,
+
+                "-i",
+                audio,
+
+                "-map",
+                "0:v",
+
+                "-map",
+                "1:a",
+
+                "-c:v",
+                "libx264",
+
+                "-c:a",
+                "aac",
+
+                "-pix_fmt",
+                "yuv420p",
+
+                final_scene
+            ])
+
+
+            print(
+                "FINAL SCENE DURATION:",
+                get_duration(final_scene)
+            )
+
+
+            scenes.append(final_scene)
 
 
 
-        # ==========================
-        # CONCAT
-        # ==========================
-
-        concat_file = os.path.join(
+        concat = os.path.join(
             TEMP_DIR,
             "concat.txt"
         )
 
 
-        with open(concat_file,"w") as f:
-
-            for scene in scenes:
-
+        with open(concat,"w") as f:
+            for s in scenes:
                 f.write(
-                    f"file '{os.path.abspath(scene)}'\n"
+                    f"file '{os.path.abspath(s)}'\n"
                 )
-
 
 
         final = os.path.join(
@@ -321,25 +299,15 @@ def generate_video():
             "0",
 
             "-i",
-            concat_file,
+            concat,
 
-            "-c:v",
-            "libx264",
-
-            "-c:a",
-            "aac",
-
-            "-pix_fmt",
-            "yuv420p",
+            "-c",
+            "copy",
 
             final
         ])
 
 
-
-        # ==========================
-        # CLOUDINARY
-        # ==========================
 
         upload = cloudinary.uploader.upload_large(
             final,
@@ -348,36 +316,23 @@ def generate_video():
 
 
         return jsonify({
-
             "status":"success",
-
             "video_url":upload["secure_url"]
-
         })
-
 
 
     except Exception as e:
 
-
         print(e)
 
         return jsonify({
-
             "status":"error",
-
             "message":str(e)
-
         }),500
 
 
 
-
-# ==========================
-# START
-# ==========================
-
-if __name__ == "__main__":
+if __name__=="__main__":
 
     app.run(
         host="0.0.0.0",
