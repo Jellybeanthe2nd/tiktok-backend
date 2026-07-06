@@ -4,21 +4,17 @@ import subprocess
 from flask import Flask, request, jsonify
 import cloudinary
 import cloudinary.uploader
-import imageio_ffmpeg
-import wave
-import contextlib
 
 app = Flask(__name__)
 
 # ----------------------------
-# FFMPEG (Render-safe)
+# SYSTEM FFMPEG (Docker installed)
 # ----------------------------
-FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-
-os.environ["FFMPEG_BINARY"] = FFMPEG
+FFMPEG = "ffmpeg"
+FFPROBE = "ffprobe"
 
 # ----------------------------
-# CLOUDINARY (PUT KEYS)
+# CLOUDINARY CONFIG
 # ----------------------------
 cloudinary.config(
     cloud_name="YOUR_CLOUD_NAME",
@@ -34,17 +30,20 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 # ----------------------------
-# HELPERS
+# RUN COMMAND HELPER
 # ----------------------------
 def run(cmd):
     subprocess.run(cmd, check=True)
 
 
+# ----------------------------
+# DOWNLOAD FILES
+# ----------------------------
 def download_file(url, filename):
-    r = requests.get(url, stream=True, timeout=30)
-    r.raise_for_status()
-
     path = os.path.join(TEMP_DIR, filename)
+
+    r = requests.get(url, stream=True, timeout=60)
+    r.raise_for_status()
 
     with open(path, "wb") as f:
         for chunk in r.iter_content(1024):
@@ -55,21 +54,22 @@ def download_file(url, filename):
 
 
 # ----------------------------
-# SAFE DURATION (NO FFMPEG PROBE)
+# GET DURATION (ROBUST FFMPEG WAY)
 # ----------------------------
 def get_duration(file_path):
-    if file_path.endswith(".wav"):
-        with contextlib.closing(wave.open(file_path, 'r')) as f:
-            frames = f.getnframes()
-            rate = f.getframerate()
-            return frames / float(rate)
+    result = subprocess.check_output([
+        FFPROBE,
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]).decode().strip()
 
-    # fallback for mp3 or unknown formats
-    return 3.0
+    return float(result)
 
 
 # ----------------------------
-# MAIN API
+# MAIN ENDPOINT
 # ----------------------------
 @app.route("/generate-video", methods=["POST"])
 def generate_video():
@@ -84,61 +84,61 @@ def generate_video():
             "message": "Missing video_urls or audio_urls"
         }), 400
 
-    scene_files = []
+    scenes = []
 
     try:
         for i in range(len(video_urls)):
 
+            # ------------------------
             # DOWNLOAD
-            vid = download_file(video_urls[i], f"vid_{i}.mp4")
-            aud = download_file(audio_urls[i], f"aud_{i}.wav")
+            # ------------------------
+            video_path = download_file(video_urls[i], f"video_{i}.mp4")
+            audio_path = download_file(audio_urls[i], f"audio_{i}.mp3")
 
-            # CONVERT AUDIO TO MP3 (SAFE FOR FFMPEG)
-            safe_audio = os.path.join(TEMP_DIR, f"safe_{i}.mp3")
+            # ------------------------
+            # GET AUDIO DURATION
+            # ------------------------
+            duration = get_duration(audio_path)
 
-            run([
-                FFMPEG, "-y",
-                "-i", aud,
-                safe_audio
-            ])
-
-            # DURATION
-            duration = get_duration(aud)
-            speed = 1 / duration if duration > 0 else 1
-
-            # ADJUST VIDEO SPEED
-            adj_video = os.path.join(TEMP_DIR, f"adj_{i}.mp4")
+            # ------------------------
+            # SPEED ADJUST VIDEO
+            # ------------------------
+            adjusted_video = os.path.join(TEMP_DIR, f"adjusted_{i}.mp4")
 
             run([
                 FFMPEG, "-y",
-                "-i", vid,
-                "-filter:v", f"setpts={speed}*PTS",
-                adj_video
+                "-i", video_path,
+                "-filter:v", f"setpts={1/duration}*PTS",
+                adjusted_video
             ])
 
+            # ------------------------
             # MERGE AUDIO + VIDEO
-            scene = os.path.join(TEMP_DIR, f"scene_{i}.mp4")
+            # ------------------------
+            scene_path = os.path.join(TEMP_DIR, f"scene_{i}.mp4")
 
             run([
                 FFMPEG, "-y",
-                "-i", adj_video,
-                "-i", safe_audio,
+                "-i", adjusted_video,
+                "-i", audio_path,
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-shortest",
-                scene
+                scene_path
             ])
 
-            scene_files.append(scene)
+            scenes.append(scene_path)
 
-        # CONCAT SCENES
+        # ------------------------
+        # CONCAT ALL SCENES
+        # ------------------------
         concat_file = os.path.join(TEMP_DIR, "concat.txt")
 
         with open(concat_file, "w") as f:
-            for s in scene_files:
-                f.write(f"file '{s}'\n")
+            for s in scenes:
+                f.write(f"file '{os.path.abspath(s)}'\n")
 
-        final_video = os.path.join(TEMP_DIR, "final.mp4")
+        final_output = os.path.join(TEMP_DIR, "final.mp4")
 
         run([
             FFMPEG, "-y",
@@ -146,12 +146,14 @@ def generate_video():
             "-safe", "0",
             "-i", concat_file,
             "-c", "copy",
-            final_video
+            final_output
         ])
 
-        # UPLOAD
+        # ------------------------
+        # UPLOAD TO CLOUDINARY
+        # ------------------------
         upload = cloudinary.uploader.upload_large(
-            final_video,
+            final_output,
             resource_type="video"
         )
 
@@ -168,7 +170,7 @@ def generate_video():
 
 
 # ----------------------------
-# RUN
+# RUN LOCALLY (ignored on Docker deploy)
 # ----------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=10000)
