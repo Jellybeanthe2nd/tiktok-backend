@@ -24,7 +24,7 @@ FFPROBE = "ffprobe"
 cloudinary.config(
     cloud_name="cbtzmlen",
     api_key="761773767925476",
-    api_secret="YOUR_SECRET_HERE"
+    api_secret="cLa3fC04tiT5ByxCqXYfJ9cYmVA"
 )
 
 
