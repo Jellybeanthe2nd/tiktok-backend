@@ -19,11 +19,11 @@ FFPROBE = "ffprobe"
 cloudinary.config(
     cloud_name="cbtzmlen",
     api_key="761773767925476",
-    api_secret="cLa3fC04tiT5ByxCqXYfJ9cYmVA"
+    api_secret="YOUR_API_SECRET_HERE"
 )
 
 # ----------------------------
-# TEMP DIR
+# TEMP DIRECTORY
 # ----------------------------
 TEMP_DIR = "temp"
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -63,7 +63,7 @@ def get_duration(file_path):
 
 
 # ----------------------------
-# MAIN ENDPOINT
+# MAIN API
 # ----------------------------
 @app.route("/generate-video", methods=["POST"])
 def generate_video():
@@ -84,30 +84,31 @@ def generate_video():
         for i in range(len(video_urls)):
 
             # ----------------------------
-            # DOWNLOAD
+            # DOWNLOAD FILES
             # ----------------------------
             video_path = download_file(video_urls[i], f"video_{i}.mp4")
             audio_path = download_file(audio_urls[i], f"audio_{i}.mp3")
 
             # ----------------------------
-            # DURATION
+            # GET AUDIO DURATION
             # ----------------------------
             duration = get_duration(audio_path)
 
             # ----------------------------
-            # ADJUST VIDEO SPEED
+            # FORCE VIDEO LENGTH MATCH AUDIO
             # ----------------------------
             adjusted_video = os.path.join(TEMP_DIR, f"adjusted_{i}.mp4")
 
             run([
                 FFMPEG, "-y",
                 "-i", video_path,
-                "-filter:v", f"setpts={1/duration}*PTS",
+                "-t", str(duration),
+                "-vf", "scale=720:1280,setsar=1",
                 adjusted_video
             ])
 
             # ----------------------------
-            # MERGE AUDIO + VIDEO (FIXED)
+            # MERGE AUDIO + VIDEO (FIXED SYNC)
             # ----------------------------
             scene_path = os.path.join(TEMP_DIR, f"scene_{i}.mp4")
 
@@ -119,7 +120,8 @@ def generate_video():
                 "-map", "1:a:0",
                 "-c:v", "libx264",
                 "-c:a", "aac",
-                "-shortest",
+                "-r", "30",
+                "-fflags", "+genpts",
                 scene_path
             ])
 
@@ -166,7 +168,7 @@ def generate_video():
 
 
 # ----------------------------
-# RUN
+# RUN SERVER
 # ----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
