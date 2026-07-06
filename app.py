@@ -6,13 +6,17 @@ from flask import Flask, request, jsonify
 import cloudinary
 import cloudinary.uploader
 import imageio_ffmpeg
-import os
 
-os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
 app = Flask(__name__)
 
 # ----------------------------
-# CLOUDINARY CONFIG
+# USE BUNDLED FFMPEG (Render safe)
+# ----------------------------
+os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+
+# ----------------------------
+# CLOUDINARY CONFIG (FILL THIS)
 # ----------------------------
 cloudinary.config(
     cloud_name="YOUR_CLOUD_NAME",
@@ -30,46 +34,54 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # ----------------------------
 # HELPERS
 # ----------------------------
-def download_file(url, filename):
-    """Download a file from URL to local storage"""
-    response = requests.get(url, stream=True)
-    if response.status_code != 200:
-        raise Exception(f"Failed download: {url}")
-
-    path = os.path.join(TEMP_DIR, filename)
-    with open(path, "wb") as f:
-        for chunk in response.iter_content(1024):
-            f.write(chunk)
-
-    return path
-
-
-def get_duration(file_path):
-    """Get audio duration using ffprobe"""
-    cmd = [
-        "ffprobe", "-i", file_path,
-        "-show_entries", "format=duration",
-        "-v", "quiet", "-of", "csv=p=0"
-    ]
-    result = subprocess.check_output(cmd).decode().strip()
-    return float(result)
-
-
 def run(cmd):
-    """Run FFmpeg command"""
     subprocess.run(cmd, check=True)
 
 
+def download_file(url, filename):
+    try:
+        r = requests.get(url, stream=True, timeout=30)
+        r.raise_for_status()
+
+        path = os.path.join(TEMP_DIR, filename)
+
+        with open(path, "wb") as f:
+            for chunk in r.iter_content(1024):
+                if chunk:
+                    f.write(chunk)
+
+        return path
+
+    except Exception as e:
+        raise Exception(f"Download failed: {url} | {str(e)}")
+
+
+def get_duration(file_path):
+    cmd = [
+        FFMPEG, "-i", file_path,
+        "-show_entries", "format=duration",
+        "-v", "quiet",
+        "-of", "csv=p=0"
+    ]
+    out = subprocess.check_output(cmd).decode().strip()
+    return float(out)
+
+
 # ----------------------------
-# MAIN API
+# MAIN ENDPOINT
 # ----------------------------
 @app.route("/generate-video", methods=["POST"])
 def generate_video():
-
     data = request.json
 
-    video_urls = data["video_urls"]
-    audio_urls = data["audio_urls"]
+    video_urls = data.get("video_urls", [])
+    audio_urls = data.get("audio_urls", [])
+
+    if len(video_urls) == 0 or len(audio_urls) == 0:
+        return jsonify({
+            "status": "error",
+            "message": "Missing video_urls or audio_urls"
+        }), 400
 
     scene_files = []
 
@@ -80,30 +92,40 @@ def generate_video():
         for i in range(len(video_urls)):
 
             vid_path = download_file(video_urls[i], f"vid_{i}.mp4")
-            aud_path = download_file(audio_urls[i], f"aud_{i}.mp3")
+            aud_path = download_file(audio_urls[i], f"aud_{i}.wav")
 
-            duration = get_duration(aud_path)
+            # convert audio to safe mp3
+            safe_audio = os.path.join(TEMP_DIR, f"safe_audio_{i}.mp3")
+
+            run([
+                FFMPEG, "-y",
+                "-i", aud_path,
+                safe_audio
+            ])
+
+            # get duration
+            duration = get_duration(safe_audio)
 
             adjusted_video = os.path.join(TEMP_DIR, f"adj_{i}.mp4")
             final_scene = os.path.join(TEMP_DIR, f"scene_{i}.mp4")
 
             # ----------------------------
-            # 1. SPEED ADJUST VIDEO TO MATCH AUDIO
+            # SPEED MATCH VIDEO TO AUDIO
             # ----------------------------
             run([
-                "ffmpeg", "-y",
+                FFMPEG, "-y",
                 "-i", vid_path,
                 "-filter:v", f"setpts={1/duration}*PTS",
                 adjusted_video
             ])
 
             # ----------------------------
-            # 2. ADD AUDIO TO VIDEO
+            # ADD AUDIO TO VIDEO
             # ----------------------------
             run([
-                "ffmpeg", "-y",
+                FFMPEG, "-y",
                 "-i", adjusted_video,
-                "-i", aud_path,
+                "-i", safe_audio,
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-shortest",
@@ -124,7 +146,7 @@ def generate_video():
         final_output = os.path.join(TEMP_DIR, "final.mp4")
 
         run([
-            "ffmpeg", "-y",
+            FFMPEG, "-y",
             "-f", "concat",
             "-safe", "0",
             "-i", concat_file,
@@ -135,14 +157,14 @@ def generate_video():
         # ----------------------------
         # UPLOAD TO CLOUDINARY
         # ----------------------------
-        upload_result = cloudinary.uploader.upload_large(
+        upload = cloudinary.uploader.upload_large(
             final_output,
             resource_type="video"
         )
 
         return jsonify({
             "status": "success",
-            "video_url": upload_result["secure_url"]
+            "video_url": upload["secure_url"]
         })
 
     except Exception as e:
@@ -150,3 +172,10 @@ def generate_video():
             "status": "error",
             "message": str(e)
         }), 500
+
+
+# ----------------------------
+# RUN (Render uses gunicorn, so this is optional)
+# ----------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
