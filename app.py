@@ -123,7 +123,7 @@ def resize_video_to_audio(video, audio, index):
     # slows video 5x
 
 
-    speed_factor = video_duration / audio_duration
+   speed_factor = audio_duration / video_duration
 
 
     stretched_video = os.path.join(
