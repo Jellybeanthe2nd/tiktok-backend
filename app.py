@@ -24,7 +24,7 @@ FFPROBE = "ffprobe"
 cloudinary.config(
     cloud_name="cbtzmlen",
     api_key="761773767925476",
-    api_secret="cLa3fC04tiT5ByxCqXYfJ9cYmVA"
+    api_secret="YOUR_SECRET_HERE"
 )
 
 
@@ -33,6 +33,7 @@ cloudinary.config(
 # =========================
 
 def run(cmd):
+
     print("RUNNING:")
     print(" ".join(cmd))
 
@@ -50,16 +51,17 @@ def run(cmd):
     return result
 
 
+
 def download(url, filename):
 
     path = os.path.join(TEMP_DIR, filename)
 
-    r = requests.get(url, timeout=120)
+    r = requests.get(
+        url,
+        timeout=120
+    )
 
-    if r.status_code != 200:
-        raise Exception(
-            f"Download failed {r.status_code}: {url}"
-        )
+    r.raise_for_status()
 
     with open(path, "wb") as f:
         f.write(r.content)
@@ -85,21 +87,36 @@ def get_duration(file):
 
 
 
+# =========================
+# VIDEO PROCESSING
+# =========================
+
 def normalize_video(input_file, output_file):
 
     run([
         FFMPEG,
         "-y",
+
         "-fflags",
         "+genpts",
+
         "-i",
         input_file,
 
         "-c:v",
         "libx264",
 
+        "-preset",
+        "ultrafast",
+
+        "-crf",
+        "28",
+
         "-pix_fmt",
         "yuv420p",
+
+        "-threads",
+        "1",
 
         output_file
     ])
@@ -111,15 +128,16 @@ def stretch_video(input_file, output_file, target_duration):
     current_duration = get_duration(input_file)
 
     if current_duration <= 0:
-        raise Exception("Video duration is zero")
+        raise Exception("Video duration invalid")
 
 
     multiplier = target_duration / current_duration
 
 
     print(
-        f"Stretching video {current_duration}s -> {target_duration}s"
+        f"Stretching {current_duration}s -> {target_duration}s"
     )
+
 
     run([
         FFMPEG,
@@ -137,12 +155,62 @@ def stretch_video(input_file, output_file, target_duration):
         "libx264",
 
         "-preset",
-        "fast",
+        "ultrafast",
+
+        "-crf",
+        "28",
 
         "-pix_fmt",
         "yuv420p",
 
+        "-threads",
+        "1",
+
         output_file
+    ])
+
+
+
+def merge_audio(video, audio, output):
+
+    run([
+        FFMPEG,
+        "-y",
+
+        "-i",
+        video,
+
+        "-i",
+        audio,
+
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "1:a:0",
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "ultrafast",
+
+        "-crf",
+        "28",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "128k",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-threads",
+        "1",
+
+        output
     ])
 
 
@@ -159,8 +227,16 @@ def generate_video():
         data = request.json
 
 
-        video_urls = data["video_urls"]
-        audio_urls = data["audio_urls"]
+        video_urls = data.get("video_urls", [])
+        audio_urls = data.get("audio_urls", [])
+
+
+        if not video_urls or not audio_urls:
+            return jsonify({
+                "status":"error",
+                "message":"Missing video_urls or audio_urls"
+            }),400
+
 
 
         scenes = []
@@ -169,13 +245,13 @@ def generate_video():
         for i in range(len(video_urls)):
 
 
-            print("===================")
+            print("================")
             print("SCENE", i)
 
 
             video = download(
                 video_urls[i],
-                f"input_video_{i}.mp4"
+                f"video_{i}.mp4"
             )
 
 
@@ -185,15 +261,20 @@ def generate_video():
             )
 
 
+            video_duration = get_duration(video)
+            audio_duration = get_duration(audio)
+
+
             print(
                 "SOURCE VIDEO:",
-                get_duration(video)
+                video_duration
             )
 
             print(
                 "AUDIO:",
-                get_duration(audio)
+                audio_duration
             )
+
 
 
             normalized = os.path.join(
@@ -207,8 +288,6 @@ def generate_video():
                 normalized
             )
 
-
-            audio_duration = get_duration(audio)
 
 
             stretched = os.path.join(
@@ -224,62 +303,44 @@ def generate_video():
             )
 
 
-            final_scene = os.path.join(
+
+            scene = os.path.join(
                 TEMP_DIR,
                 f"scene_{i}.mp4"
             )
 
 
-            run([
-                FFMPEG,
-                "-y",
-
-                "-i",
+            merge_audio(
                 stretched,
-
-                "-i",
                 audio,
-
-                "-map",
-                "0:v",
-
-                "-map",
-                "1:a",
-
-                "-c:v",
-                "libx264",
-
-                "-c:a",
-                "aac",
-
-                "-pix_fmt",
-                "yuv420p",
-
-                final_scene
-            ])
-
-
-            print(
-                "FINAL SCENE DURATION:",
-                get_duration(final_scene)
+                scene
             )
 
 
-            scenes.append(final_scene)
+            print(
+                "FINAL SCENE:",
+                get_duration(scene)
+            )
+
+
+            scenes.append(scene)
 
 
 
-        concat = os.path.join(
+        concat_file = os.path.join(
             TEMP_DIR,
             "concat.txt"
         )
 
 
-        with open(concat,"w") as f:
-            for s in scenes:
+        with open(concat_file,"w") as f:
+
+            for scene in scenes:
+
                 f.write(
-                    f"file '{os.path.abspath(s)}'\n"
+                    f"file '{os.path.abspath(scene)}'\n"
                 )
+
 
 
         final = os.path.join(
@@ -299,10 +360,22 @@ def generate_video():
             "0",
 
             "-i",
-            concat,
+            concat_file,
 
-            "-c",
-            "copy",
+            "-c:v",
+            "libx264",
+
+            "-preset",
+            "ultrafast",
+
+            "-crf",
+            "28",
+
+            "-c:a",
+            "aac",
+
+            "-threads",
+            "1",
 
             final
         ])
@@ -316,9 +389,13 @@ def generate_video():
 
 
         return jsonify({
+
             "status":"success",
+
             "video_url":upload["secure_url"]
+
         })
+
 
 
     except Exception as e:
@@ -326,13 +403,17 @@ def generate_video():
         print(e)
 
         return jsonify({
+
             "status":"error",
+
             "message":str(e)
+
         }),500
 
 
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
