@@ -10,13 +10,18 @@ import imageio_ffmpeg
 app = Flask(__name__)
 
 # ----------------------------
-# USE BUNDLED FFMPEG (Render safe)
+# FFMPEG / FFPROBE (Render safe)
 # ----------------------------
-os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
-FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+FFMPEG_DIR = imageio_ffmpeg.get_ffmpeg_exe()
+FFMPEG = FFMPEG_DIR
+
+# ffprobe is in same folder as ffmpeg
+FFPROBE = FFMPEG.replace("ffmpeg", "ffprobe")
+
+os.environ["FFMPEG_BINARY"] = FFMPEG
 
 # ----------------------------
-# CLOUDINARY CONFIG (FILL THIS)
+# CLOUDINARY CONFIG
 # ----------------------------
 cloudinary.config(
     cloud_name="YOUR_CLOUD_NAME",
@@ -56,13 +61,16 @@ def download_file(url, filename):
         raise Exception(f"Download failed: {url} | {str(e)}")
 
 
+# FIXED: correct ffprobe usage
 def get_duration(file_path):
     cmd = [
-        FFMPEG, "-i", file_path,
+        FFPROBE,
+        "-v", "error",
         "-show_entries", "format=duration",
-        "-v", "quiet",
-        "-of", "csv=p=0"
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
     ]
+
     out = subprocess.check_output(cmd).decode().strip()
     return float(out)
 
@@ -77,7 +85,7 @@ def generate_video():
     video_urls = data.get("video_urls", [])
     audio_urls = data.get("audio_urls", [])
 
-    if len(video_urls) == 0 or len(audio_urls) == 0:
+    if not video_urls or not audio_urls:
         return jsonify({
             "status": "error",
             "message": "Missing video_urls or audio_urls"
@@ -94,7 +102,7 @@ def generate_video():
             vid_path = download_file(video_urls[i], f"vid_{i}.mp4")
             aud_path = download_file(audio_urls[i], f"aud_{i}.wav")
 
-            # convert audio to safe mp3
+            # convert audio → safe mp3
             safe_audio = os.path.join(TEMP_DIR, f"safe_audio_{i}.mp3")
 
             run([
@@ -103,24 +111,26 @@ def generate_video():
                 safe_audio
             ])
 
-            # get duration
+            # get audio duration
             duration = get_duration(safe_audio)
 
             adjusted_video = os.path.join(TEMP_DIR, f"adj_{i}.mp4")
             final_scene = os.path.join(TEMP_DIR, f"scene_{i}.mp4")
 
             # ----------------------------
-            # SPEED MATCH VIDEO TO AUDIO
+            # MATCH VIDEO SPEED TO AUDIO
             # ----------------------------
+            speed_factor = 1 / duration if duration > 0 else 1
+
             run([
                 FFMPEG, "-y",
                 "-i", vid_path,
-                "-filter:v", f"setpts={1/duration}*PTS",
+                "-filter:v", f"setpts={speed_factor}*PTS",
                 adjusted_video
             ])
 
             # ----------------------------
-            # ADD AUDIO TO VIDEO
+            # MERGE AUDIO + VIDEO
             # ----------------------------
             run([
                 FFMPEG, "-y",
@@ -135,7 +145,7 @@ def generate_video():
             scene_files.append(final_scene)
 
         # ----------------------------
-        # CONCATENATE ALL SCENES
+        # CONCAT ALL SCENES
         # ----------------------------
         concat_file = os.path.join(TEMP_DIR, "concat.txt")
 
@@ -175,7 +185,7 @@ def generate_video():
 
 
 # ----------------------------
-# RUN (Render uses gunicorn, so this is optional)
+# RUN (Render uses gunicorn)
 # ----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
